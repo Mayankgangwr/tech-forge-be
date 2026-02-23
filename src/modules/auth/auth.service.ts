@@ -14,6 +14,15 @@ import * as tokenService from "./token.service";
 
 const refreshExpiresAt = (): Date => new Date(Date.now() + REFRESH_TOKEN_MAX_AGE);
 
+const isTransactionUnsupportedError = (error: unknown): boolean => {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const mongoCode = (error as { code?: unknown }).code;
+  return mongoCode === 20 || /replica set member or mongos/i.test(error.message);
+};
+
 const issueTokenPair = (user: { _id: mongoose.Types.ObjectId; role: UserRole }) => {
   const userId = user._id.toString();
   const refreshJti = randomUUID();
@@ -70,6 +79,30 @@ export const register = async (payload: RegisterInput, context?: SessionContext)
         { session: dbSession }
       );
     });
+  } catch (error) {
+    if (!isTransactionUnsupportedError(error)) {
+      throw error;
+    }
+
+    // Local standalone MongoDB instances do not support transactions.
+    const createdUser = await User.create({
+      email: payload.email,
+      password: passwordHash,
+      role: UserRole.USER,
+    });
+
+    createdUserId = createdUser._id;
+
+    try {
+      await UserProfile.create({
+        user: createdUser._id,
+        firstName: payload.firstName,
+        lastName: payload.lastName,
+      });
+    } catch (profileError) {
+      await User.deleteOne({ _id: createdUser._id });
+      throw profileError;
+    }
   } finally {
     await dbSession.endSession();
   }
