@@ -5,7 +5,12 @@ import { AppError } from "../utils/appError";
 import { sendError } from "../utils/apiResponse";
 
 export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
-  logger.error(`[${req.method}] ${req.originalUrl} - ${err.message}`);
+  logger.error("request_error", {
+    requestId: req.requestId,
+    method: req.method,
+    path: req.originalUrl,
+    message: err.message,
+  });
 
   if (err instanceof AppError) {
     return sendError(res, err.statusCode, err.message);

@@ -21,7 +21,6 @@ const userProfileSchema = new Schema<IUserProfile, UserProfileModel>(
       ref: "User",
       required: true,
       unique: true,
-      index: true,
     },
     firstName: {
       type: String,
@@ -57,7 +56,4 @@ const userProfileSchema = new Schema<IUserProfile, UserProfileModel>(
     versionKey: false,
   }
 );
-
-userProfileSchema.index({ user: 1 }, { unique: true });
-
 export const UserProfile = model<IUserProfile, UserProfileModel>("UserProfile", userProfileSchema);

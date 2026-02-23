@@ -1,8 +1,8 @@
-export const USER_ROLES = ["USER", "ADMIN"] as const;
+import { UserRole } from "./roles";
 
-export type UserRole = (typeof USER_ROLES)[number];
+export { UserRole };
 
-export interface SerializedUser {
+export interface SafeUserDTO {
   id: string;
   email: string;
   role: UserRole;
@@ -11,3 +11,5 @@ export interface SerializedUser {
   updatedAt?: Date;
   lastLoginAt?: Date | null;
 }
+
+export type SerializedUser = SafeUserDTO;

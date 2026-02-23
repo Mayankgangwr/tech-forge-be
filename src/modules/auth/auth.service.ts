@@ -1,99 +1,38 @@
 import mongoose from "mongoose";
 import { randomUUID } from "crypto";
-import { RegisterInput, LoginInput } from "./auth.types";
-import { User } from "../user/user.model";
-import { UserProfile } from "../user/userProfile.model";
-import { SerializedUser } from "../user/user.types";
+import logger from "../../config/logger";
+import { REFRESH_TOKEN_MAX_AGE } from "../../config/constants";
 import { AppError } from "../../utils/appError";
 import { compareHash, hashValue } from "../../utils/hash";
-import { signAccessToken, signRefreshToken, verifyRefreshToken } from "../../utils/jwt";
-import { RefreshSession } from "./auth.model";
-import { REFRESH_TOKEN_MAX_AGE } from "../../config/constants";
+import { User } from "../user/user.model";
+import { UserProfile } from "../user/userProfile.model";
+import { toSafeUserDTO } from "../user/user.mapper";
+import { UserRole } from "../user/user.types";
+import { AuthResult, LoginInput, RegisterInput, SessionContext } from "./auth.types";
+import * as sessionService from "./session.service";
+import * as tokenService from "./token.service";
 
-interface SessionMetadata {
-  ip?: string;
-  userAgent?: string;
-}
+const refreshExpiresAt = (): Date => new Date(Date.now() + REFRESH_TOKEN_MAX_AGE);
 
-interface TokenPair {
-  accessToken: string;
-  refreshToken: string;
-}
-
-const serializeUser = (user: {
-  _id: mongoose.Types.ObjectId;
-  email: string;
-  role: "USER" | "ADMIN";
-  isActive: boolean;
-  createdAt?: Date;
-  updatedAt?: Date;
-  lastLoginAt?: Date | null;
-}): SerializedUser => {
-  return {
-    id: user._id.toString(),
-    email: user.email,
-    role: user.role,
-    isActive: user.isActive,
-    createdAt: user.createdAt,
-    updatedAt: user.updatedAt,
-    lastLoginAt: user.lastLoginAt ?? null,
-  };
-};
-
-const issueTokenPair = (user: { _id: mongoose.Types.ObjectId; role: "USER" | "ADMIN" }) => {
+const issueTokenPair = (user: { _id: mongoose.Types.ObjectId; role: UserRole }) => {
   const userId = user._id.toString();
   const refreshJti = randomUUID();
 
-  const accessToken = signAccessToken({
+  const accessToken = tokenService.signAccessToken({
     sub: userId,
     role: user.role,
-    type: "access",
   });
 
-  const refreshToken = signRefreshToken({
+  const refreshToken = tokenService.signRefreshToken({
     sub: userId,
     role: user.role,
-    type: "refresh",
     jti: refreshJti,
   });
 
-  return {
-    accessToken,
-    refreshToken,
-    refreshJti,
-  };
+  return { accessToken, refreshToken, refreshJti };
 };
 
-const createRefreshSession = async (
-  userId: mongoose.Types.ObjectId,
-  refreshToken: string,
-  jti: string,
-  metadata: SessionMetadata
-): Promise<void> => {
-  const tokenHash = await hashValue(refreshToken);
-
-  await RefreshSession.create({
-    user: userId,
-    jti,
-    tokenHash,
-    expiresAt: new Date(Date.now() + REFRESH_TOKEN_MAX_AGE),
-    ip: metadata.ip,
-    userAgent: metadata.userAgent,
-  });
-};
-
-const getSessionMetadata = (headers: { [key: string]: unknown }, ip?: string): SessionMetadata => {
-  return {
-    ip,
-    userAgent: typeof headers["user-agent"] === "string" ? headers["user-agent"] : undefined,
-  };
-};
-
-export const register = async (
-  payload: RegisterInput,
-  headers: { [key: string]: unknown },
-  ip?: string
-): Promise<{ user: SerializedUser; tokens: TokenPair }> => {
+export const register = async (payload: RegisterInput, context?: SessionContext): Promise<AuthResult> => {
   const existingUser = await User.exists({ email: payload.email });
   if (existingUser) {
     throw new AppError("Email is already registered", 409);
@@ -111,7 +50,7 @@ export const register = async (
           {
             email: payload.email,
             password: passwordHash,
-            role: "USER",
+            role: UserRole.USER,
           },
         ],
         { session: dbSession }
@@ -145,10 +84,17 @@ export const register = async (
   }
 
   const { accessToken, refreshToken, refreshJti } = issueTokenPair(user);
-  await createRefreshSession(user._id, refreshToken, refreshJti, getSessionMetadata(headers, ip));
+
+  await sessionService.createSession({
+    userId: user._id,
+    refreshToken,
+    jti: refreshJti,
+    expiresAt: refreshExpiresAt(),
+    context,
+  });
 
   return {
-    user: serializeUser(user),
+    user: toSafeUserDTO(user),
     tokens: {
       accessToken,
       refreshToken,
@@ -156,23 +102,37 @@ export const register = async (
   };
 };
 
-export const login = async (
-  payload: LoginInput,
-  headers: { [key: string]: unknown },
-  ip?: string
-): Promise<{ user: SerializedUser; tokens: TokenPair }> => {
+export const login = async (payload: LoginInput, context?: SessionContext): Promise<AuthResult> => {
   const user = await User.findOne({ email: payload.email }).select("+password");
 
   if (!user) {
+    logger.warn("auth_login_failure", {
+      requestId: context?.requestId,
+      email: payload.email,
+      reason: "user_not_found",
+      ip: context?.ip,
+    });
     throw new AppError("Invalid credentials", 401);
   }
 
   const isValidPassword = await compareHash(payload.password, user.password);
   if (!isValidPassword) {
+    logger.warn("auth_login_failure", {
+      requestId: context?.requestId,
+      userId: user._id.toString(),
+      reason: "invalid_password",
+      ip: context?.ip,
+    });
     throw new AppError("Invalid credentials", 401);
   }
 
   if (!user.isActive) {
+    logger.warn("auth_login_failure", {
+      requestId: context?.requestId,
+      userId: user._id.toString(),
+      reason: "inactive_account",
+      ip: context?.ip,
+    });
     throw new AppError("Account is inactive", 403);
   }
 
@@ -180,10 +140,23 @@ export const login = async (
   await user.save();
 
   const { accessToken, refreshToken, refreshJti } = issueTokenPair(user);
-  await createRefreshSession(user._id, refreshToken, refreshJti, getSessionMetadata(headers, ip));
+
+  await sessionService.createSession({
+    userId: user._id,
+    refreshToken,
+    jti: refreshJti,
+    expiresAt: refreshExpiresAt(),
+    context,
+  });
+
+  logger.info("auth_login_success", {
+    requestId: context?.requestId,
+    userId: user._id.toString(),
+    ip: context?.ip,
+  });
 
   return {
-    user: serializeUser(user),
+    user: toSafeUserDTO(user),
     tokens: {
       accessToken,
       refreshToken,
@@ -191,40 +164,44 @@ export const login = async (
   };
 };
 
-export const refresh = async (
-  refreshToken: string,
-  headers: { [key: string]: unknown },
-  ip?: string
-): Promise<{ user: SerializedUser; tokens: TokenPair }> => {
-  const payload = verifyRefreshToken(refreshToken);
+export const refresh = async (refreshToken: string, context?: SessionContext): Promise<AuthResult> => {
+  const payload = tokenService.verifyRefreshToken(refreshToken);
 
-  if (payload.type !== "refresh" || !payload.jti) {
+  if (!payload.jti) {
     throw new AppError("Invalid refresh token", 401);
   }
 
-  const session = await RefreshSession.findOne({
+  const session = await sessionService.validateSession({
+    userId: payload.sub,
     jti: payload.jti,
-    user: new mongoose.Types.ObjectId(payload.sub),
-    revokedAt: null,
-  }).select("+tokenHash");
+  });
 
   if (!session) {
     throw new AppError("Invalid refresh token", 401);
   }
 
   if (session.expiresAt.getTime() <= Date.now()) {
-    session.revokedAt = new Date();
-    session.revokedReason = "expired";
-    await session.save();
+    await sessionService.revokeSession({
+      jti: payload.jti,
+      reason: "expired",
+    });
     throw new AppError("Refresh token expired", 401);
   }
 
-  const isMatchingToken = await compareHash(refreshToken, session.tokenHash);
-  if (!isMatchingToken) {
-    session.revokedAt = new Date();
-    session.revokedReason = "token_mismatch";
-    await session.save();
-    throw new AppError("Invalid refresh token", 401);
+  const isReuseDetected = await sessionService.detectRefreshReuse({
+    session,
+    refreshToken,
+    context,
+  });
+
+  if (isReuseDetected) {
+    logger.warn("auth_refresh_reuse_detected", {
+      requestId: context?.requestId,
+      userId: payload.sub,
+      jti: payload.jti,
+      ip: context?.ip,
+    });
+    throw new AppError("Refresh token reuse detected", 401);
   }
 
   const user = await User.findById(payload.sub);
@@ -233,16 +210,23 @@ export const refresh = async (
   }
 
   const { accessToken, refreshToken: rotatedRefreshToken, refreshJti } = issueTokenPair(user);
+  await sessionService.rotateSession({ sessionId: session._id, replacedByToken: refreshJti });
+  await sessionService.createSession({
+    userId: user._id,
+    refreshToken: rotatedRefreshToken,
+    jti: refreshJti,
+    expiresAt: refreshExpiresAt(),
+    context,
+  });
 
-  session.revokedAt = new Date();
-  session.revokedReason = "rotated";
-  session.replacedByToken = refreshJti;
-  await session.save();
-
-  await createRefreshSession(user._id, rotatedRefreshToken, refreshJti, getSessionMetadata(headers, ip));
+  logger.info("auth_refresh_success", {
+    requestId: context?.requestId,
+    userId: user._id.toString(),
+    ip: context?.ip,
+  });
 
   return {
-    user: serializeUser(user),
+    user: toSafeUserDTO(user),
     tokens: {
       accessToken,
       refreshToken: rotatedRefreshToken,
@@ -250,36 +234,31 @@ export const refresh = async (
   };
 };
 
-export const logout = async (refreshToken?: string): Promise<void> => {
+export const logout = async (refreshToken?: string, context?: SessionContext): Promise<void> => {
   if (!refreshToken) {
     return;
   }
 
   try {
-    const payload = verifyRefreshToken(refreshToken);
+    const payload = tokenService.verifyRefreshToken(refreshToken);
 
-    if (payload.type !== "refresh" || !payload.jti) {
+    if (!payload.jti) {
       return;
     }
 
-    await RefreshSession.updateOne(
-      {
-        jti: payload.jti,
-        revokedAt: null,
-      },
-      {
-        $set: {
-          revokedAt: new Date(),
-          revokedReason: "logout",
-        },
-      }
-    );
+    await sessionService.revokeSession({ jti: payload.jti, reason: "logout" });
+
+    logger.info("auth_logout", {
+      requestId: context?.requestId,
+      userId: payload.sub,
+      ip: context?.ip,
+    });
   } catch {
     // Ignore invalid refresh token during logout, client cookies are still cleared.
   }
 };
 
-export const me = async (userId: string): Promise<SerializedUser> => {
+export const me = async (userId: string) => {
   const user = await User.findById(userId);
 
   if (!user) {
@@ -290,5 +269,5 @@ export const me = async (userId: string): Promise<SerializedUser> => {
     throw new AppError("Account is inactive", 403);
   }
 
-  return serializeUser(user);
+  return toSafeUserDTO(user);
 };

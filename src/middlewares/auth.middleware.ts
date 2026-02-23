@@ -1,8 +1,9 @@
 import { NextFunction, Request, Response } from "express";
-import { verifyAccessToken } from "../utils/jwt";
+import logger from "../config/logger";
 import { AppError } from "../utils/appError";
 import { UserRole } from "../modules/user/user.types";
 import { AUTH_COOKIE_NAMES } from "../config/constants";
+import { verifyAccessToken } from "../modules/auth/token.service";
 
 const getBearerToken = (authorization?: string): string | null => {
   if (!authorization || !authorization.startsWith("Bearer ")) {
@@ -42,6 +43,12 @@ export const requireRole = (...allowedRoles: UserRole[]) => {
     }
 
     if (!allowedRoles.includes(req.user.role)) {
+      logger.warn("auth_role_access_denied", {
+        requestId: req.requestId,
+        userId: req.user.id,
+        role: req.user.role,
+        allowedRoles,
+      });
       throw new AppError("Insufficient permissions", 403);
     }
 

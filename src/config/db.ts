@@ -5,9 +5,11 @@ import logger from "./logger";
 export const connectDB = async () => {
   try {
     await mongoose.connect(env.MONGO_URI);
-    logger.info("MongoDB connected successfully");
+    logger.info("database_connected");
   } catch (error) {
-    logger.error("MongoDB connection failed");
+    logger.error("database_connection_failed", {
+      message: error instanceof Error ? error.message : "Unknown database error",
+    });
     process.exit(1);
   }
 };

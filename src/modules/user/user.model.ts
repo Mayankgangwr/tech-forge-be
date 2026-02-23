@@ -1,5 +1,6 @@
 import { Model, Schema, model } from "mongoose";
-import { USER_ROLES, UserRole } from "./user.types";
+import { UserRole } from "./user.types";
+import { USER_ROLES } from "./roles";
 
 export interface IUser {
   email: string;
@@ -30,7 +31,7 @@ const userSchema = new Schema<IUser, UserModel>(
     role: {
       type: String,
       enum: USER_ROLES,
-      default: "USER",
+      default: UserRole.USER,
       index: true,
     },
     isActive: {
@@ -48,7 +49,4 @@ const userSchema = new Schema<IUser, UserModel>(
     versionKey: false,
   }
 );
-
-userSchema.index({ email: 1 }, { unique: true });
-
 export const User = model<IUser, UserModel>("User", userSchema);

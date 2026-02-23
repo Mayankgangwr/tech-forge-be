@@ -33,3 +33,5 @@ export const ACCESS_TOKEN_MAX_AGE = parseDurationToMs(env.ACCESS_TOKEN_TTL, 15 *
 export const REFRESH_TOKEN_MAX_AGE = parseDurationToMs(env.REFRESH_TOKEN_TTL, 7 * 24 * 60 * 60 * 1000);
 
 export const IS_PRODUCTION = env.NODE_ENV === "production";
+export const AUTH_TRANSPORT_MODE = env.AUTH_TRANSPORT_MODE;
+export const AUTH_COOKIE_SAME_SITE = env.AUTH_COOKIE_SAME_SITE;

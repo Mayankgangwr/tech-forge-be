@@ -1,88 +1,96 @@
 import { Request, Response } from "express";
-import {
-  ACCESS_TOKEN_MAX_AGE,
-  AUTH_COOKIE_NAMES,
-  IS_PRODUCTION,
-  REFRESH_TOKEN_MAX_AGE,
-} from "../../config/constants";
-import { env } from "../../config/env";
+import { AUTH_COOKIE_NAMES } from "../../config/constants";
+import { clearCsrfToken, issueCsrfToken } from "../../middlewares/csrf.middleware";
 import { AppError } from "../../utils/appError";
 import { sendSuccess } from "../../utils/apiResponse";
 import { asyncHandler } from "../../utils/asyncHandler";
+import { SessionContext } from "./auth.types";
 import * as authService from "./auth.service";
+import {
+  authPayloadForResponse,
+  clearAuthTransport,
+  isCookieTransport,
+  setAuthTransport,
+} from "./auth.transport";
 
-const cookieOptions = (maxAge: number) => ({
-  httpOnly: true,
-  secure: IS_PRODUCTION,
-  sameSite: IS_PRODUCTION ? ("none" as const) : ("lax" as const),
-  maxAge,
-  domain: env.COOKIE_DOMAIN,
-  path: "/",
+const sessionContextFromRequest = (req: Request): SessionContext => {
+  return {
+    ip: req.ip,
+    userAgent: typeof req.headers["user-agent"] === "string" ? req.headers["user-agent"] : undefined,
+    requestId: req.requestId,
+  };
+};
+
+const getBearerToken = (authorization?: string): string | undefined => {
+  if (!authorization || !authorization.startsWith("Bearer ")) {
+    return undefined;
+  }
+
+  return authorization.slice(7);
+};
+
+const resolveRefreshToken = (req: Request): string | undefined => {
+  if (isCookieTransport()) {
+    return req.cookies?.[AUTH_COOKIE_NAMES.refreshToken] as string | undefined;
+  }
+
+  const refreshTokenFromBody = typeof req.body?.refreshToken === "string" ? req.body.refreshToken : undefined;
+  const refreshTokenFromHeader = getBearerToken(req.headers.authorization);
+  return refreshTokenFromBody ?? refreshTokenFromHeader;
+};
+
+export const csrfToken = asyncHandler(async (_req: Request, res: Response) => {
+  if (!isCookieTransport()) {
+    return sendSuccess(res, 200, "CSRF protection not required in bearer mode", { csrfToken: null });
+  }
+
+  const token = issueCsrfToken(res);
+  return sendSuccess(res, 200, "CSRF token issued", { csrfToken: token });
 });
 
-const clearCookieOptions = {
-  httpOnly: true,
-  secure: IS_PRODUCTION,
-  sameSite: IS_PRODUCTION ? ("none" as const) : ("lax" as const),
-  domain: env.COOKIE_DOMAIN,
-  path: "/",
-};
-
-const setAuthCookies = (res: Response, accessToken: string, refreshToken: string): void => {
-  res.cookie(AUTH_COOKIE_NAMES.accessToken, accessToken, cookieOptions(ACCESS_TOKEN_MAX_AGE));
-  res.cookie(AUTH_COOKIE_NAMES.refreshToken, refreshToken, cookieOptions(REFRESH_TOKEN_MAX_AGE));
-};
-
-const clearAuthCookies = (res: Response): void => {
-  res.clearCookie(AUTH_COOKIE_NAMES.accessToken, clearCookieOptions);
-  res.clearCookie(AUTH_COOKIE_NAMES.refreshToken, clearCookieOptions);
-};
-
 export const register = asyncHandler(async (req: Request, res: Response) => {
-  const result = await authService.register(req.body, req.headers as Record<string, unknown>, req.ip);
+  const result = await authService.register(req.body, sessionContextFromRequest(req));
 
-  setAuthCookies(res, result.tokens.accessToken, result.tokens.refreshToken);
+  setAuthTransport(res, result.tokens);
+  issueCsrfToken(res);
 
-  return sendSuccess(res, 201, "Registration successful", {
-    user: result.user,
-    accessToken: result.tokens.accessToken,
-  });
+  return sendSuccess(res, 201, "Registration successful", authPayloadForResponse(result));
 });
 
 export const login = asyncHandler(async (req: Request, res: Response) => {
-  const result = await authService.login(req.body, req.headers as Record<string, unknown>, req.ip);
+  const result = await authService.login(req.body, sessionContextFromRequest(req));
 
-  setAuthCookies(res, result.tokens.accessToken, result.tokens.refreshToken);
+  setAuthTransport(res, result.tokens);
+  issueCsrfToken(res);
 
-  return sendSuccess(res, 200, "Login successful", {
-    user: result.user,
-    accessToken: result.tokens.accessToken,
-  });
+  return sendSuccess(res, 200, "Login successful", authPayloadForResponse(result));
 });
 
 export const refresh = asyncHandler(async (req: Request, res: Response) => {
-  const refreshToken = req.cookies?.[AUTH_COOKIE_NAMES.refreshToken] as string | undefined;
+  const refreshToken = resolveRefreshToken(req);
 
   if (!refreshToken) {
-    clearAuthCookies(res);
-    throw new AppError("Refresh token is required", 401);
+    clearAuthTransport(res);
+    throw new AppError(
+      "Refresh token is required. Provide it via cookie (cookie mode) or body/Authorization header (bearer mode).",
+      400
+    );
   }
 
-  const result = await authService.refresh(refreshToken, req.headers as Record<string, unknown>, req.ip);
+  const result = await authService.refresh(refreshToken, sessionContextFromRequest(req));
 
-  setAuthCookies(res, result.tokens.accessToken, result.tokens.refreshToken);
+  setAuthTransport(res, result.tokens);
+  issueCsrfToken(res);
 
-  return sendSuccess(res, 200, "Token refreshed", {
-    user: result.user,
-    accessToken: result.tokens.accessToken,
-  });
+  return sendSuccess(res, 200, "Token refreshed", authPayloadForResponse(result));
 });
 
 export const logout = asyncHandler(async (req: Request, res: Response) => {
-  const refreshToken = req.cookies?.[AUTH_COOKIE_NAMES.refreshToken] as string | undefined;
+  const refreshToken = resolveRefreshToken(req);
 
-  await authService.logout(refreshToken);
-  clearAuthCookies(res);
+  await authService.logout(refreshToken, sessionContextFromRequest(req));
+  clearAuthTransport(res);
+  clearCsrfToken(res);
 
   return sendSuccess(res, 200, "Logged out", { loggedOut: true });
 });

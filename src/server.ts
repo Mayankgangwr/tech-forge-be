@@ -1,14 +1,19 @@
 import app from "./app";
-import { connectDB } from "./config/db";
 import { env } from "./config/env";
 import logger from "./config/logger";
+import { loadDatabase } from "./loaders";
 
 const startServer = async () => {
-  await connectDB();
+  await loadDatabase();
 
   app.listen(env.PORT, () => {
-    logger.info(`Server running on port ${env.PORT}`);
+    logger.info("server_started", { port: env.PORT });
   });
 };
 
-startServer();
+startServer().catch((error: unknown) => {
+  logger.error("server_start_failed", {
+    message: error instanceof Error ? error.message : "Unknown startup error",
+  });
+  process.exit(1);
+});

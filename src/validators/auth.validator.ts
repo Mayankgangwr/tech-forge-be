@@ -27,3 +27,11 @@ export const loginValidation = {
 export const emptyBodyValidation = {
   body: z.object({}).passthrough(),
 };
+
+export const refreshValidation = {
+  body: z
+    .object({
+      refreshToken: z.string().min(1).optional(),
+    })
+    .passthrough(),
+};

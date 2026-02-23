@@ -38,7 +38,6 @@ const refreshSessionSchema = new Schema<IRefreshSession, RefreshSessionModel>(
     expiresAt: {
       type: Date,
       required: true,
-      index: true,
     },
     revokedAt: {
       type: Date,
